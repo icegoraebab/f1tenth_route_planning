@@ -22,6 +22,7 @@ setup(
         'console_scripts': [
             'global_planner = f1tenth_route_planning.global_planner:main',
             'pure_pursuit  = f1tenth_route_planning.pure_pursuit_controller:main',
+            'odom2map_tf = f1tenth_route_planning.odom_to_map_tf:main',
         ],
     },
 )
