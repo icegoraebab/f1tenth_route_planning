@@ -1,214 +1,276 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import math, heapq
+import math
+import heapq
 from typing import List, Tuple, Optional
+
 import numpy as np
 
 import rclpy
 from rclpy.node import Node
-from rclpy.duration import Duration
-from geometry_msgs.msg import PointStamped, PoseStamped, Quaternion
-from nav_msgs.msg import OccupancyGrid, Path
-from visualization_msgs.msg import Marker, MarkerArray
-import tf2_ros
-from std_srvs.srv import Empty
+from rclpy.qos import QoSProfile
 
-def yaw_to_quat(yaw: float) -> Quaternion:
-    q = Quaternion()
-    q.z = math.sin(yaw * 0.5)
-    q.w = math.cos(yaw * 0.5)
-    q.x = 0.0
-    q.y = 0.0
-    return q
+from nav_msgs.msg import OccupancyGrid, Path
+from geometry_msgs.msg import PoseStamped, PointStamped
+from visualization_msgs.msg import MarkerArray, Marker
+
+import tf2_ros
+from tf_transformations import quaternion_from_euler
+
+def world_to_grid(x, y, origin_x, origin_y, res, width, height):
+    gx = int((x - origin_x) / res)
+    gy = int((y - origin_y) / res)
+    if gx < 0 or gy < 0 or gx >= width or gy >= height:
+        return None
+    return gx, gy
+
+def grid_to_world(gx, gy, origin_x, origin_y, res):
+    wx = origin_x + (gx + 0.5) * res
+    wy = origin_y + (gy + 0.5) * res
+    return wx, wy
+
+def astar(grid: np.ndarray,
+          start: Tuple[int,int],
+          goal: Tuple[int,int],
+          passable) -> Optional[List[Tuple[int,int]]]:
+    """4-connected A* (grid[y,x])"""
+    width = grid.shape[1]
+    height = grid.shape[0]
+    sx, sy = start
+    gx, gy = goal
+    if not (0 <= sx < width and 0 <= sy < height and 0 <= gx < width and 0 <= gy < height):
+        return None
+
+    def h(a,b):  # manhattan
+        return abs(a[0]-b[0]) + abs(a[1]-b[1])
+
+    openq = []
+    heapq.heappush(openq, (h(start, goal), 0, start, None))
+    came = {}
+    gscore = {start: 0}
+    closed = set()
+
+    nb = [(1,0),(-1,0),(0,1),(0,-1)]
+    while openq:
+        _, g, cur, parent = heapq.heappop(openq)
+        if cur in closed: 
+            continue
+        came[cur] = parent
+        if cur == goal:
+            # reconstruct
+            path = []
+            p = cur
+            while p is not None:
+                path.append(p)
+                p = came[p]
+            path.reverse()
+            return path
+        closed.add(cur)
+        cx, cy = cur
+        for dx,dy in nb:
+            nx, ny = cx+dx, cy+dy
+            if nx<0 or ny<0 or nx>=width or ny>=height: 
+                continue
+            nxt = (nx, ny)
+            if nxt in closed: 
+                continue
+            if not passable(nx, ny): 
+                continue
+            ng = g + 1
+            if ng < gscore.get(nxt, 1e18):
+                gscore[nxt] = ng
+                heapq.heappush(openq, (ng + h(nxt, goal), ng, nxt, cur))
+    return None
 
 class GlobalPlanner(Node):
+    """
+    - /map (OccupancyGrid) 수신
+    - /clicked_point (PointStamped, map)로 웨이포인트 입력
+    - map→base_link TF로 현재 포즈 취득
+    - A*로 /global_path 발행 (실패시 직선 보간 fallback)
+    """
     def __init__(self):
         super().__init__('global_planner')
-        self.declare_parameter('map_frame', 'map')
-        self.declare_parameter('base_frame', 'base_link')
-        self.declare_parameter('path_topic', '/global_path')
+
+        # params
+        self.declare_parameter('map_topic', '/map')
         self.declare_parameter('clicked_topic', '/clicked_point')
-        self.declare_parameter('allow_diagonal', True)
-        self.declare_parameter('inflate_radius_m', 0.25)
-        self.declare_parameter('unknown_is_obstacle', True)
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('base_frame', 'ego_racecar/base_link')
+        self.declare_parameter('occupied_thresh', 50)           # >= 50 : 장애물
+        self.declare_parameter('unknown_is_obstacle', False)    # True면 -1도 장애물
+        self.declare_parameter('inflate_radius_m', 0.03)        # 좁은 트랙 고려
+        self.declare_parameter('min_path_points', 50)           # path 해상도
 
-        self.map_frame  = self.get_parameter('map_frame').get_parameter_value().string_value
-        self.base_frame = self.get_parameter('base_frame').get_parameter_value().string_value
-        self.path_topic = self.get_parameter('path_topic').get_parameter_value().string_value
-        self.clicked_topic = self.get_parameter('clicked_topic').get_parameter_value().string_value
-        self.allow_diag = self.get_parameter('allow_diagonal').get_parameter_value().bool_value
-        self.inflate_r_m = self.get_parameter('inflate_radius_m').get_parameter_value().double_value
-        self.unknown_block = self.get_parameter('unknown_is_obstacle').get_parameter_value().bool_value
+        self.map_topic     = self.get_parameter('map_topic').value
+        self.clicked_topic = self.get_parameter('clicked_topic').value
+        self.map_frame     = self.get_parameter('map_frame').value
+        self.base_frame    = self.get_parameter('base_frame').value
+        self.occ_thresh    = int(self.get_parameter('occupied_thresh').value)
+        self.unknown_obs   = bool(self.get_parameter('unknown_is_obstacle').value)
+        self.inflate_r     = float(self.get_parameter('inflate_radius_m').value)
+        self.min_pts       = int(self.get_parameter('min_path_points').value)
 
-        self.tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=10))
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.get_logger().info(f"GlobalPlanner: base_frame={self.base_frame}, inflate={self.inflate_r}, unknown_is_obstacle={self.unknown_obs}")
 
-        self.map_sub = self.create_subscription(OccupancyGrid, '/map', self.on_map, 1)
+        qos = QoSProfile(depth=1)
+        self.map_sub = self.create_subscription(OccupancyGrid, self.map_topic, self.on_map, qos)
         self.click_sub = self.create_subscription(PointStamped, self.clicked_topic, self.on_click, 10)
-        self.path_pub = self.create_publisher(Path, self.path_topic, 1)
-        self.mark_pub = self.create_publisher(MarkerArray, '/waypoints_markers', 1)
-        self.clear_srv = self.create_service(Empty, '/waypoints_clear', self.on_clear)
 
-        self.map: Optional[OccupancyGrid] = None
-        self.grid: Optional[np.ndarray] = None
-        self.w = self.h = None
-        self.resolution = None
-        self.origin_xy = None
-        self.wps: List[Tuple[float,float]] = []
-        self.full_path: List[Tuple[float,float]] = []
+        self.path_pub = self.create_publisher(Path, '/global_path', 10)
+        self.marker_pub = self.create_publisher(MarkerArray, '/waypoints_markers', 1)
 
-        self.get_logger().info('GlobalPlanner: RViz Publish Point로 웨이포인트를 찍어주세요.')
+        self.tfbuf = tf2_ros.Buffer()
+        self.tflistener = tf2_ros.TransformListener(self.tfbuf, self)
 
+        self.map_msg = None
+        self.waypoints: List[Tuple[float,float]] = []
+
+        # 안내
+        self.get_logger().info("RViz Publish Point로 웨이포인트를 찍어주세요. (두 점 이상)")
+
+    # ---------------- callbacks ----------------
     def on_map(self, msg: OccupancyGrid):
-        self.map = msg
-        self.w, self.h = msg.info.width, msg.info.height
-        self.resolution = msg.info.resolution
-        self.origin_xy = (msg.info.origin.position.x, msg.info.origin.position.y)
-
-        data = np.array(msg.data, dtype=np.int16).reshape((self.h,self.w))
-        if self.unknown_block:
-            data[data < 0] = 100
-        occ = (data >= 50).astype(np.uint8)
-
-        r = max(1, int(round(self.inflate_r_m / self.resolution)))
-        if r>0:
-            occ = self.inflate(occ, r)
-        self.grid = (occ>0).astype(np.uint8)
-
-    def inflate(self, occ: np.ndarray, r: int) -> np.ndarray:
-        H,W = occ.shape
-        inflated = occ.copy()
-        for dy in range(-r, r+1):
-            for dx in range(-r, r+1):
-                if dx*dx + dy*dy > r*r: continue
-                sy1,sy2 = max(0,dy), min(H,H+dy)
-                sx1,sx2 = max(0,dx), min(W,W+dx)
-                tmp = np.zeros_like(occ)
-                tmp[sy1:sy2, sx1:sx2] = occ[sy1-dy:sy2-dy, sx1-dx:sx2-dx]
-                inflated = np.maximum(inflated, tmp)
-        return inflated
-
-    def on_clear(self, req, res):
-        self.wps.clear(); self.full_path.clear()
-        self.publish_markers(); self.publish_path([])
-        self.get_logger().info('Waypoints cleared')
-        return res
+        self.map_msg = msg
 
     def on_click(self, msg: PointStamped):
         if msg.header.frame_id != self.map_frame:
-            self.get_logger().warn('clicked point frame이 map이 아님 → 무시')
+            self.get_logger().warn(f'clicked frame {msg.header.frame_id} != {self.map_frame}')
             return
-        self.wps.append((msg.point.x, msg.point.y))
+        self.waypoints.append( (msg.point.x, msg.point.y) )
         self.publish_markers()
-        self.replan()
+        if len(self.waypoints) >= 1:
+            self.replan()
 
+    # --------------- core ----------------------
     def replan(self):
-        if self.grid is None or self.map is None or not self.wps: return
-        pose = self.lookup_pose()
-        if pose is None: return
-        sx, sy, _ = pose
-        pts: List[Tuple[float,float]] = []
-        cur = (sx, sy)
-        ok = True
-        for goal in self.wps:
-            seg = self.astar(cur, goal)
-            if not seg:
-                self.get_logger().warn('A* 실패(세그먼트)'); ok = False; break
-            pts.extend(seg if not pts else seg[1:])
-            cur = goal
-        if ok:
-            pts = self.smooth(pts, 5)
-            self.full_path = pts
-            self.publish_path(pts)
-            self.get_logger().info(f'Global path pts={len(pts)}')
+        # 0) 맵 체크
+        if self.map_msg is None:
+            self.get_logger().warn('맵을 아직 못 받음(/map). 잠시 후 다시.')
+            return
+        m = self.map_msg
+        width  = m.info.width
+        height = m.info.height
+        res    = m.info.resolution
+        ox     = m.info.origin.position.x
+        oy     = m.info.origin.position.y
 
-    def smooth(self, pts, k=5):
-        if len(pts)<k: return pts
-        xs = np.array([p[0] for p in pts]); ys = np.array([p[1] for p in pts])
-        ker = np.ones(k)/k
-        xs_s = np.convolve(xs, ker, 'same'); ys_s = np.convolve(ys, ker, 'same')
-        xs_s[:k//2]=xs[:k//2]; xs_s[-k//2:]=xs[-k//2:]
-        ys_s[:k//2]=ys[:k//2]; ys_s[-k//2:]=ys[-k//2:]
-        return list(zip(xs_s.tolist(), ys_s.tolist()))
+        data = np.int16(np.array(m.data, dtype=np.int16)).reshape((height, width))
+        # inflate
+        inflate_cells = max(1, int(self.inflate_r / res))
+        occ = np.zeros_like(data, dtype=np.uint8)
+        if self.unknown_obs:
+            occ_mask = (data >= self.occ_thresh) | (data < 0)
+        else:
+            occ_mask = (data >= self.occ_thresh)
+        occ[occ_mask] = 1
+        if inflate_cells > 0:
+            from scipy.ndimage import maximum_filter
+            try:
+                occ = maximum_filter(occ, size=inflate_cells*2+1)
+            except Exception:
+                # scipy가 없다면 간단한 확장
+                k = inflate_cells
+                occ = np.pad(occ, ((k,k),(k,k)), mode='edge')
+                for y in range(k, k+height):
+                    for x in range(k, k+width):
+                        window = occ[y-k:y+k+1, x-k:x+k+1]
+                        occ[y,x] = 1 if np.any(window) else 0
+                occ = occ[k:k+height, k:k+width]
 
-    def world_to_cell(self, x,y):
-        ox,oy = self.origin_xy
-        cx = int((x-ox)/self.resolution); cy = int((y-oy)/self.resolution)
-        return cy,cx
-    def cell_to_world(self, cy,cx):
-        ox,oy = self.origin_xy
-        wx = ox + (cx+0.5)*self.resolution; wy = oy + (cy+0.5)*self.resolution
-        return wx,wy
-
-    def neigh(self, cy,cx):
-        steps = [(-1,0),(1,0),(0,-1),(0,1)]
-        if self.allow_diag: steps += [(-1,-1),(-1,1),(1,-1),(1,1)]
-        for dy,dx in steps:
-            ny,nx = cy+dy, cx+dx
-            if 0<=ny<self.h and 0<=nx<self.w: yield ny,nx
-
-    def h(self,a,b): return math.hypot(a[0]-b[0], a[1]-b[1])
-
-    def astar(self, start_w, goal_w):
-        sy,sx = self.world_to_cell(*start_w); gy,gx = self.world_to_cell(*goal_w)
-        if self.grid[sy,sx] or self.grid[gy,gx]: return None
-        openq=[]; heapq.heappush(openq,(0.0,(sy,sx)))
-        g={ (sy,sx):0.0 }; parent={ (sy,sx):None }
-        while openq:
-            _,cur = heapq.heappop(openq)
-            if cur==(gy,gx):
-                cells=[]; c=cur
-                while c is not None: cells.append(c); c=parent[c]
-                cells.reverse()
-                return [self.cell_to_world(cy,cx) for cy,cx in cells]
-            for ny,nx in self.neigh(*cur):
-                if self.grid[ny,nx]: continue
-                step = math.hypot(ny-cur[0], nx-cur[1])
-                tentative = g[cur]+step
-                if (ny,nx) not in g or tentative<g[(ny,nx)]:
-                    g[(ny,nx)]=tentative
-                    f = tentative + self.h((ny,nx),(gy,gx))
-                    parent[(ny,nx)] = cur
-                    heapq.heappush(openq,(f,(ny,nx)))
-        return None
-
-    def lookup_pose(self) -> Optional[Tuple[float,float,float]]:
+        # 1) 시작 포즈(로봇 현재 위치)
         try:
-            tf = self.tf_buffer.lookup_transform(self.map_frame, self.base_frame, rclpy.time.Time())
-            x = tf.transform.translation.x; y = tf.transform.translation.y
-            q = tf.transform.rotation
-            siny_cosp = 2.0*(q.w*q.z + q.x*q.y)
-            cosy_cosp = 1.0 - 2.0*(q.y*q.y + q.z*q.z)
-            yaw = math.atan2(siny_cosp, cosy_cosp)
-            return (x,y,yaw)
+            tf = self.tfbuf.lookup_transform(self.map_frame, self.base_frame, rclpy.time.Time())
         except Exception as e:
-            self.get_logger().warn(f'TF error: {e}')
-            return None
+            self.get_logger().warn(f'TF 조회 실패: {e}')
+            return
+        sx = tf.transform.translation.x
+        sy = tf.transform.translation.y
 
-    def publish_path(self, pts):
-        path = Path(); path.header.frame_id = self.map_frame
+        # 2) 경유점(마지막 점을 목표로)
+        if len(self.waypoints) == 0:
+            self.get_logger().info('웨이포인트가 없음')
+            return
+        gx, gy = self.waypoints[-1]
+
+        # 3) grid index로 변환
+        s_idx = world_to_grid(sx, sy, ox, oy, res, width, height)
+        g_idx = world_to_grid(gx, gy, ox, oy, res, width, height)
+        if s_idx is None or g_idx is None:
+            self.get_logger().warn(f'시작/목표가 맵 밖: start={s_idx}, goal={g_idx}')
+            # 페일백: 직선 경로 생성
+            self.publish_fallback(sx, sy, gx, gy)
+            return
+
+        def passable(x, y):
+            return occ[y, x] == 0
+
+        # 4) A*
+        path_grid = astar(occ, (s_idx[0], s_idx[1]), (g_idx[0], g_idx[1]), passable)
+        if path_grid is None or len(path_grid) < 2:
+            self.get_logger().warn('A* 실패 → 직선 경로로 페일백')
+            self.publish_fallback(sx, sy, gx, gy)
+            return
+
+        # 5) grid -> world
+        pts: List[Tuple[float,float]] = [ grid_to_world(x, y, ox, oy, res) for (x,y) in path_grid ]
+
+        # 6) Path 발행
+        self.publish_path(pts)
+
+    def publish_fallback(self, sx, sy, gx, gy):
+        # 직선 보간 (최소 min_pts개)
+        n = max(self.min_pts, 2)
+        xs = np.linspace(sx, gx, n)
+        ys = np.linspace(sy, gy, n)
+        pts = list(zip(xs.tolist(), ys.tolist()))
+        self.publish_path(pts, note='[fallback]')
+
+    def publish_path(self, pts: List[Tuple[float,float]], note: str=''):
+        path = Path()
+        path.header.frame_id = self.map_frame
         path.header.stamp = self.get_clock().now().to_msg()
-        for x,y in pts:
-            ps = PoseStamped(); ps.header.frame_id = self.map_frame
-            ps.pose.position.x = x; ps.pose.position.y = y
-            ps.pose.orientation = yaw_to_quat(0.0)
+        yaw_prev = None
+        for (x,y) in pts:
+            ps = PoseStamped()
+            ps.header = path.header
+            ps.pose.position.x = x
+            ps.pose.position.y = y
+            if yaw_prev is None:
+                yaw = 0.0
+            else:
+                dx = x - yaw_prev[0]; dy = y - yaw_prev[1]
+                yaw = math.atan2(dy, dx)
+            q = quaternion_from_euler(0,0,yaw)
+            ps.pose.orientation.x, ps.pose.orientation.y, ps.pose.orientation.z, ps.pose.orientation.w = q[0], q[1], q[2], q[3]
+            yaw_prev = (x,y)
             path.poses.append(ps)
         self.path_pub.publish(path)
+        self.get_logger().info(f'{note} /global_path 발행: {len(path.poses)} pts')
 
     def publish_markers(self):
-        ma = MarkerArray(); now = self.get_clock().now().to_msg()
-        for i,(x,y) in enumerate(self.wps):
-            m = Marker(); m.header.frame_id=self.map_frame; m.header.stamp=now
-            m.ns='wps'; m.id=i; m.type=Marker.SPHERE; m.action=Marker.ADD
-            m.pose.position.x=x; m.pose.position.y=y
-            m.scale.x=m.scale.y=m.scale.z=0.25
-            m.color.r,m.color.g,m.color.b,m.color.a = (0.9,0.3,0.1,0.9)
+        ma = MarkerArray()
+        for i,(x,y) in enumerate(self.waypoints):
+            m = Marker()
+            m.header.frame_id = self.map_frame
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns = 'wps'
+            m.id = i
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            m.pose.position.x = x
+            m.pose.position.y = y
+            m.pose.position.z = 0.0
+            m.scale.x = m.scale.y = m.scale.z = 0.15
+            m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.5, 0.2, 1.0
             ma.markers.append(m)
-        self.mark_pub.publish(ma)
+        self.marker_pub.publish(ma)
 
 def main():
     rclpy.init()
     node = GlobalPlanner()
     rclpy.spin(node)
-    node.destroy_node()
     rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
