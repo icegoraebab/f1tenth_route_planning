@@ -23,20 +23,61 @@ ros2 launch f1tenth_route_planning path_plan.launch.py \
   global_planner.base_frame:=ego_racecar/base_link \
   global_planner.inflate_radius_m:=0.03 \
   global_planner.unknown_is_obstacle:=false \
+  global_planner.hop_by_hop:=false \
+  global_planner.use_all_waypoints:=false \
   pure_pursuit.base_frame:=ego_racecar/base_link \
   pure_pursuit.use_scan_safety:=false \
-  pure_pursuit.lookahead:=0.8
+  pure_pursuit.lookahead:=0.5
+
 ```
 # 2B) 터미널 2 — 멀티 웨이포인트 ON(모든 점 잇기)
 ```
 ros2 launch f1tenth_route_planning path_plan.launch.py \
   global_planner.base_frame:=ego_racecar/base_link \
-  global_planner.use_all_waypoints:=true \
   global_planner.inflate_radius_m:=0.03 \
   global_planner.unknown_is_obstacle:=false \
+  global_planner.hop_by_hop:=false \
+  global_planner.use_all_waypoints:=true \
   pure_pursuit.base_frame:=ego_racecar/base_link \
   pure_pursuit.use_scan_safety:=false \
-  pure_pursuit.lookahead:=0.8
+  pure_pursuit.lookahead:=0.5
+```
+# 2C) 터미널 2 — Hope by Hope ON(각 점 도착시 다음 점으로 경로 재계획 )
+
+```
+ros2 launch f1tenth_route_planning path_plan.launch.py \
+  global_planner.base_frame:=ego_racecar/base_link \
+  global_planner.inflate_radius_m:=0.03 \
+  global_planner.unknown_is_obstacle:=false \
+  global_planner.hop_by_hop:=true \
+  global_planner.use_all_waypoints:=false \
+  global_planner.wp_reach_tol:=0.45 \
+  pure_pursuit.base_frame:=ego_racecar/base_link \
+  pure_pursuit.use_scan_safety:=false \
+  pure_pursuit.lookahead:=0.45
+```
+# 터미널 2에서 다시 run 하지않고 bash에서 파라미터 바꾸기
+```
+# 올-웨이포인트 ON
+ros2 param set /global_planner hop_by_hop false
+ros2 param set /global_planner use_all_waypoints true
+```
+
+```
+# 홉바이홉 ON
+ros2 param set /global_planner hop_by_hop true
+ros2 param set /global_planner wp_reach_tol 0.45
+```
+
+# RViz 에서 Publish Point 없애기
+```
+#모든 점 삭제
+ros2 service call /waypoints_clear std_srvs/srv/Empty "{}"
+```
+
+```
+#최근 한 점 삭제
+ros2 service call /waypoints_pop   std_srvs/srv/Empty "{}"
 ```
 
 # RViz
@@ -51,6 +92,8 @@ Toolbar Publish Point → Frame=map, Topic=/clicked_point
 
 2B) 멀티: 원하는 만큼 점을 순서대로 클릭
 
+2C) 홉 바이 홉: 원하는 만큼 점을 순서대로 클릭
+
 # 개요
 
 글로벌 경로계획: /map(OccupancyGrid) 기반 A* 경로 탐색
@@ -61,7 +104,7 @@ A* 실패 시 직선 보간(fallback) 으로라도 /global_path 발행
 
 로컬 추종(Pure Pursuit): /global_path를 따라 주행
 
-웨이포인트 관리: 클릭/초기화/Undo, 멀티 웨이포인트 모드 지원
+웨이포인트 관리: 클릭/초기화/Undo, 멀티 웨이포인트 모드 지원, hop by hop 지원
 
 # 요구 사항
 
@@ -137,19 +180,41 @@ ros2 param get /global_planner base_frame  # → ego_racecar/base_link
 
 
 # 파라미터 요약
-노드	파라미터	설명	기본
-global_planner	base_frame	로봇 프레임	ego_racecar/base_link
 
-〃	inflate_radius_m	장애물 팽창 반경(m)	0.03
-
-〃	unknown_is_obstacle	-1(미지) 영역을 장애물 처리	false
-
-〃	use_all_waypoints	모든 점 잇기(멀티)	false
-
-〃	min_path_points	직선 페일백 샘플 수	60
-
-pure_pursuit	lookahead	전방 주시거리(m)	0.8
-
-〃	use_scan_safety	AEB 유사 안전정지	false
+| 노드            | 파라미터            | 설명                     | 설정                  |
+|:----------------|:--------------------|:-------------------------|:----------------------|
+| global_planner  | base_frame          | 로봇 프레임              | ego_racecar/base_link |
+| 〃              | inflate_radius_m    | 장애물 팽창 반경(m)      | 0.03                  |
+| 〃              | unknown_is_obstacle | -1(미지) 영역을 장애물로 | false                 |
+| 〃              | use_all_waypoints   | 모든 점 잇기(멀티)       | false                 |
+| 〃              | min_path_points     | 직선 페일백 샘플 수      | 60                    |
+| pure_pursuit    | lookahead           | 전방 주시거리(m)         | 0.8                   |
+| 〃              | use_scan_safety     | AEB 유사 안전정지        | false                 |
 
 디버깅 단계에서는 AEB(안전정지)를 꺼두는 것을 권장 (use_scan_safety:=false).
+
+# 멀티 웨이포인트(All waypoint), 홉 바이 홉(Hop by Hop) 차이
+
+### 중간점 ‘확실히 밟기’ 보장
+
+HOP ✅ (tol로 도착 판정, 다음으로 넘어감)
+
+ALL ❌ (lookahead가 크면 중간점 건너뜀 가능)
+
+### 동적 장애물/드리프트 대응
+
+HOP ✅ (각 점마다 의도적 재계획)
+
+ALL △ (기본은 고정 경로; 네가 클릭 추가/삭제할 때만 재계획)
+
+### 주행 감각
+
+HOP: 구간-구간 연결이라 잠깐 멈칫 가능(도착→재계획→재가속). tol↑, timer↑, min_path_points↑로 완화
+
+ALL: 매끄럽게 쭉 감. 대신 코너에서 컷 날 수 있음
+
+### 쓰임새
+
+HOP: 체크포인트 정확 방문/액션(정지·작업) 필요한 미션
+
+ALL: 레이싱 라인/부드러운 주행 한 방에
