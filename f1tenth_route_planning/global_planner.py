@@ -17,7 +17,7 @@ from geometry_msgs.msg import PoseStamped, PointStamped
 from visualization_msgs.msg import MarkerArray, Marker
 
 import tf2_ros
-from transforms3d.euler import euler2quat  # Foxy에서 사용 OK
+from transforms3d.euler import euler2quat  # Foxy OK
 
 # ---------- 유틸 ---------- #
 def world_to_grid(x, y, ox, oy, res, w, h):
@@ -29,7 +29,7 @@ def grid_to_world(gx, gy, ox, oy, res):
     return ox + (gx + 0.5) * res, oy + (gy + 0.5) * res
 
 def inflate_occ_binary(occ: np.ndarray, k: int) -> np.ndarray:
-    """8-연결로 k셀 팽창 (SciPy 없이 빠르게)"""
+    """8-연결로 k셀 팽창 (SciPy 없이)"""
     if k <= 0: return occ.copy()
     h, w = occ.shape
     BIG = 10**9
@@ -90,18 +90,19 @@ def astar(grid: np.ndarray, start: Tuple[int,int], goal: Tuple[int,int], passabl
 
 class GlobalPlanner(Node):
     """
-    - /map(OccupancyGrid) 구독(QoS: Transient Local)
-    - /clicked_point(map)로 웨이포인트 입력
-    - **use_all_waypoints가 true면**: 현재포즈→wp1→wp2→... 순서로 전부 이어서 경로 생성
-      false면 마지막 점 하나만 목표로 경로 생성
-    - A* 실패 시 세그먼트별 직선 보간으로 페일백
-    - /global_path 발행 + /waypoints_markers 시각화 + clear/pop 서비스 제공
+    - /map(OccupancyGrid) 구독(Transient Local)
+    - /clicked_point(map) 웨이포인트 입력
+    - 모드
+      * use_all_waypoints=true  → 현재포즈→wp1→...→wpN 한 번에 경로
+      * hop_by_hop=true         → wp1 도착하면 자동으로 wp2로 넘어가며 재계획
+    - A* 실패 시 직선 보간 페일백
+    - /global_path 발행 + /waypoints_markers 시각화 + clear/pop 서비스
     """
 
     def __init__(self):
         super().__init__('global_planner')
 
-        # 파라미터
+        # ---- 파라미터 ----
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('clicked_topic', '/clicked_point')
         self.declare_parameter('map_frame', 'map')
@@ -110,8 +111,11 @@ class GlobalPlanner(Node):
         self.declare_parameter('unknown_is_obstacle', False)
         self.declare_parameter('inflate_radius_m', 0.03)
         self.declare_parameter('min_path_points', 60)
-        self.declare_parameter('use_all_waypoints', False)  # 기본 OFF
+        self.declare_parameter('use_all_waypoints', True)   # 기본 ON으로 변경
+        self.declare_parameter('hop_by_hop', True)          # ★ 추가: 기본 ON
+        self.declare_parameter('wp_reach_tol', 0.35)        # ★ 추가: 도착 판정(m)
 
+        # 캐시
         self.map_topic   = self.get_parameter('map_topic').value
         self.click_topic = self.get_parameter('clicked_topic').value
         self.map_frame   = self.get_parameter('map_frame').value
@@ -122,33 +126,40 @@ class GlobalPlanner(Node):
         self.min_pts     = int(self.get_parameter('min_path_points').value)
 
         self.get_logger().info(
-            f'[GlobalPlanner] base_frame={self.base_frame}, '
-            f'inflate={self.inflate_r:.3f}m, unknown_is_obstacle={self.unknown_obs}'
+            f'[GlobalPlanner] base_frame={self.base_frame}, inflate={self.inflate_r:.3f}m, '
+            f'unknown_is_obstacle={self.unknown_obs}'
         )
 
-        # /map은 Transient Local로 구독해야 과거(래치) 샘플 수신
+        # /map (래치) 구독
         map_qos = QoSProfile(depth=1)
         map_qos.reliability = QoSReliabilityPolicy.RELIABLE
         map_qos.durability  = QoSDurabilityPolicy.TRANSIENT_LOCAL
         self.map_sub = self.create_subscription(OccupancyGrid, self.map_topic, self.on_map, map_qos)
 
+        # 클릭 포인트 구독
         self.click_sub = self.create_subscription(PointStamped, self.click_topic, self.on_click, 10)
 
+        # 퍼블리셔
         self.path_pub   = self.create_publisher(Path, '/global_path', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/waypoints_markers', 1)
 
-        # 서비스: 전체삭제 + 마지막점 삭제(Undo)
+        # 서비스
         self.clear_srv = self.create_service(Empty, 'waypoints_clear', self.on_clear)
         self.pop_srv   = self.create_service(Empty, 'waypoints_pop',   self.on_pop)
 
-        # TF buffer
+        # TF
         self.tfbuf = tf2_ros.Buffer()
         self.tflistener = tf2_ros.TransformListener(self.tfbuf, self)
 
+        # 상태
         self.map_msg = None
         self.waypoints: List[Tuple[float,float]] = []
+        self.active_idx: Optional[int] = None   # ★ hop-by-hop 현재 타깃 인덱스
 
-        self.get_logger().info('RViz Publish Point로 웨이포인트를 찍으세요. (여러 점 가능)')
+        # 주기 체크 (도착 판정 & 자동 진행)
+        self.timer = self.create_timer(0.10, self._tick)  # 10Hz
+
+        self.get_logger().info('RViz의 Publish Point로 웨이포인트를 차례로 찍으세요.')
 
     # -------- callbacks -------- #
     def on_map(self, msg: OccupancyGrid):
@@ -159,21 +170,29 @@ class GlobalPlanner(Node):
             self.get_logger().warn(f'clicked_point frame {msg.header.frame_id} != {self.map_frame}')
             return
         self.waypoints.append((msg.point.x, msg.point.y))
+
+        # hop-by-hop 인데 아직 타깃이 없으면 0번부터 시작
+        if bool(self.get_parameter('hop_by_hop').value) and self.active_idx is None:
+            self.active_idx = 0
+
         self.publish_markers()
         self.replan()
 
     def on_clear(self, req, resp):
         self.waypoints.clear()
+        self.active_idx = None
         ma = MarkerArray(); m = Marker(); m.action = Marker.DELETEALL; ma.markers.append(m)
         self.marker_pub.publish(ma)
-        # 빈 path 퍼블리시하여 시각적으로도 초기화
-        self.path_pub.publish(Path())
+        self.path_pub.publish(Path())  # 시각 초기화
         self.get_logger().info('웨이포인트 초기화')
         return resp
 
     def on_pop(self, req, resp):
         if self.waypoints:
             self.waypoints.pop()
+            # active_idx 조정
+            if self.active_idx is not None and self.active_idx >= len(self.waypoints):
+                self.active_idx = None if not self.waypoints else len(self.waypoints)-1
             self.publish_markers()
             self.replan()
             self.get_logger().info('마지막 웨이포인트 제거')
@@ -181,10 +200,39 @@ class GlobalPlanner(Node):
             self.get_logger().info('제거할 웨이포인트가 없음')
         return resp
 
+    # -------- periodic -------- #
+    def _tick(self):
+        """hop-by-hop 모드에서 도착 판정 → 다음 웨이포인트로 진행"""
+        if not bool(self.get_parameter('hop_by_hop').value):
+            return
+        if self.map_msg is None or self.active_idx is None:
+            return
+        if self.active_idx < 0 or self.active_idx >= len(self.waypoints):
+            return
+
+        # 현재 포즈
+        try:
+            tf = self.tfbuf.lookup_transform(self.map_frame, self.base_frame, rclpy.time.Time())
+        except Exception:
+            return
+        rx = tf.transform.translation.x
+        ry = tf.transform.translation.y
+
+        gx, gy = self.waypoints[self.active_idx]
+        tol = float(self.get_parameter('wp_reach_tol').value)
+        if (rx - gx)**2 + (ry - gy)**2 <= tol*tol:
+            self.get_logger().info(f'웨이포인트 #{self.active_idx} 도착 (tol={tol:.2f}m)')
+            self.active_idx += 1
+            if self.active_idx >= len(self.waypoints):
+                self.get_logger().info('모든 웨이포인트 완료')
+                self.active_idx = None
+            self.publish_markers()
+            self.replan()
+
     # -------- core -------- #
     def replan(self):
         if self.map_msg is None:
-            self.get_logger().warn('맵을 아직 못 받음(/map). 잠시 후 다시.')
+            self.get_logger().warn('맵을 아직 못 받음(/map).')
             return
         if len(self.waypoints) == 0:
             self.get_logger().info('웨이포인트가 없음')
@@ -213,9 +261,14 @@ class GlobalPlanner(Node):
         sx = tf.transform.translation.x
         sy = tf.transform.translation.y
 
-        # 🔥 실행 중에도 토글 가능: 여기서 매번 현재 값을 읽는다
+        # 모드 결정
+        hop = bool(self.get_parameter('hop_by_hop').value)
         use_all = bool(self.get_parameter('use_all_waypoints').value)
-        targets = self.waypoints if use_all else [self.waypoints[-1]]
+
+        if hop and self.active_idx is not None:
+            targets = [ self.waypoints[self.active_idx] ]
+        else:
+            targets = self.waypoints if use_all else [self.waypoints[-1]]
 
         prevx, prevy = sx, sy
         all_pts: List[Tuple[float,float]] = []
@@ -245,7 +298,7 @@ class GlobalPlanner(Node):
             self.get_logger().warn('생성된 경로가 비어있음')
             return
 
-        self.publish_path(all_pts, use_all=use_all)
+        self.publish_path(all_pts, mode='HOP' if (hop and self.active_idx is not None) else ('ALL' if use_all else 'LAST'))
 
     # ------ helpers/pubs ------ #
     def _segment_fallback(self, sx, sy, gx, gy, n: int = None):
@@ -253,7 +306,7 @@ class GlobalPlanner(Node):
         xs = np.linspace(sx, gx, n); ys = np.linspace(sy, gy, n)
         return list(zip(xs.tolist(), ys.tolist()))
 
-    def publish_path(self, pts: List[Tuple[float,float]], use_all: bool):
+    def publish_path(self, pts: List[Tuple[float,float]], mode: str):
         path = Path()
         path.header.frame_id = self.map_frame
         path.header.stamp = self.get_clock().now().to_msg()
@@ -272,19 +325,32 @@ class GlobalPlanner(Node):
             path.poses.append(ps); prev = (x, y)
 
         self.path_pub.publish(path)
-        self.get_logger().info(f'/global_path 발행: {len(path.poses)} pts (use_all_waypoints={use_all})')
+        self.get_logger().info(f'/global_path 발행: {len(path.poses)} pts (mode={mode})')
 
     def publish_markers(self):
         ma = MarkerArray()
+        hop = bool(self.get_parameter('hop_by_hop').value)
+        now = self.get_clock().now().to_msg()
         for i, (x, y) in enumerate(self.waypoints):
             m = Marker()
             m.header.frame_id = self.map_frame
-            m.header.stamp = self.get_clock().now().to_msg()
+            m.header.stamp = now
             m.ns = 'wps'; m.id = i
             m.type = Marker.SPHERE; m.action = Marker.ADD
             m.pose.position.x = x; m.pose.position.y = y; m.pose.position.z = 0.0
-            m.scale.x = m.scale.y = m.scale.z = 0.15
-            m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.5, 0.2, 1.0
+            m.scale.x = m.scale.y = m.scale.z = 0.18
+
+            # 색상: 지난 점=녹색, 현재 타깃=노란색, 대기=주황색
+            if hop and self.active_idx is not None:
+                if i < self.active_idx:   # passed
+                    m.color.r, m.color.g, m.color.b, m.color.a = 0.2, 0.8, 0.2, 1.0
+                elif i == self.active_idx:  # active
+                    m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 1.0, 0.2, 1.0
+                else:
+                    m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.5, 0.2, 1.0
+            else:
+                m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.5, 0.2, 1.0
+
             ma.markers.append(m)
         self.marker_pub.publish(ma)
 
