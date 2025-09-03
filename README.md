@@ -180,45 +180,40 @@ ros2 param get /global_planner base_frame  # → ego_racecar/base_link
 
 
 # 파라미터 요약
-|노드|	파라미터|	설명|	설정|
 
-|global_planner|	base_frame|	로봇| 프레임|	ego_racecar/base_link|
-
-|〃	|inflate_radius_m	|장애물 팽창 반경(m)|	0.03|
-
-|〃	|unknown_is_obstacle	|-1(미지) 영역을 장애물 처리	|false|
-
-|〃	|use_all_waypoints	|모든 점 잇기(멀티)	|false|
-
-|〃	|min_path_points	|직선 페일백 샘플 수	|60|
-
-|pure_pursuit	|lookahead	|전방 주시거리(m)	|0.8|
-
-|〃	|use_scan_safety	|AEB 유사 안전정지	|false|
+| 노드            | 파라미터            | 설명                     | 설정                  |
+|:----------------|:--------------------|:-------------------------|:----------------------|
+| global_planner  | base_frame          | 로봇 프레임              | ego_racecar/base_link |
+| 〃              | inflate_radius_m    | 장애물 팽창 반경(m)      | 0.03                  |
+| 〃              | unknown_is_obstacle | -1(미지) 영역을 장애물로 | false                 |
+| 〃              | use_all_waypoints   | 모든 점 잇기(멀티)       | false                 |
+| 〃              | min_path_points     | 직선 페일백 샘플 수      | 60                    |
+| pure_pursuit    | lookahead           | 전방 주시거리(m)         | 0.8                   |
+| 〃              | use_scan_safety     | AEB 유사 안전정지        | false                 |
 
 디버깅 단계에서는 AEB(안전정지)를 꺼두는 것을 권장 (use_scan_safety:=false).
 
 # 멀티 웨이포인트(All waypoint), 홉 바이 홉(Hop by Hop) 차이
 
-중간점 ‘확실히 밟기’ 보장
+### 중간점 ‘확실히 밟기’ 보장
 
 HOP ✅ (tol로 도착 판정, 다음으로 넘어감)
 
 ALL ❌ (lookahead가 크면 중간점 건너뜀 가능)
 
-동적 장애물/드리프트 대응
+### 동적 장애물/드리프트 대응
 
 HOP ✅ (각 점마다 의도적 재계획)
 
 ALL △ (기본은 고정 경로; 네가 클릭 추가/삭제할 때만 재계획)
 
-주행 감각
+### 주행 감각
 
 HOP: 구간-구간 연결이라 잠깐 멈칫 가능(도착→재계획→재가속). tol↑, timer↑, min_path_points↑로 완화
 
 ALL: 매끄럽게 쭉 감. 대신 코너에서 컷 날 수 있음
 
-쓰임새
+### 쓰임새
 
 HOP: 체크포인트 정확 방문/액션(정지·작업) 필요한 미션
 
