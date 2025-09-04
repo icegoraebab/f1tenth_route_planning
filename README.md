@@ -1,4 +1,4 @@
-## 🚀 F1TENTH Route Planning (ROS 2 Foxy)
+# 🚀 F1TENTH Route Planning (ROS 2 Foxy)
 
 프레임 체인: map → ego_racecar/base_link
 구성: 글로벌 경로계획(A*) + 로컬 추종(Pure Pursuit)
