@@ -70,13 +70,14 @@ ros2 param set /global_planner wp_reach_tol 0.45
 ```
 
 ## RViz 에서 Publish Point 없애기
+
+모든 점 삭제
 ```
-#모든 점 삭제
 ros2 service call /waypoints_clear std_srvs/srv/Empty "{}"
 ```
 
+최근 한 점 삭제
 ```
-#최근 한 점 삭제
 ros2 service call /waypoints_pop   std_srvs/srv/Empty "{}"
 ```
 
