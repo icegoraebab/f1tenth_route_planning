@@ -57,26 +57,26 @@ ros2 launch f1tenth_route_planning path_plan.launch.py \
   pure_pursuit.lookahead:=0.45
 ```
 ## 터미널 2에서 다시 run 하지않고 bash에서 파라미터 바꾸기
+올 웨이포인트 ON
 ```
-# 올-웨이포인트 ON
 ros2 param set /global_planner hop_by_hop false
 ros2 param set /global_planner use_all_waypoints true
 ```
 
+홉바이홉 ON
 ```
-## 홉바이홉 ON
 ros2 param set /global_planner hop_by_hop true
 ros2 param set /global_planner wp_reach_tol 0.45
 ```
 
 ## RViz 에서 Publish Point 없애기
 ```
-## 모든 점 삭제
+#모든 점 삭제
 ros2 service call /waypoints_clear std_srvs/srv/Empty "{}"
 ```
 
 ```
-## 최근 한 점 삭제
+#최근 한 점 삭제
 ros2 service call /waypoints_pop   std_srvs/srv/Empty "{}"
 ```
 
@@ -120,7 +120,7 @@ Python 라이브러리: transforms3d (이미 사용 중)
 sudo apt install ros-foxy-tf-transformations
 
 
-#### ✔️ RViz 사용법
+## RViz 사용법
 
 Fixed Frame: map
 
@@ -147,11 +147,22 @@ ros2 service call /waypoints_clear std_srvs/srv/Empty {}
 ```
 ros2 service call /waypoints_pop std_srvs/srv/Empty {}
 ```
-(멀티 모드) 실행 중 토글
+
+#### (멀티모드) 실행중 토글
+
+올-웨이포인트 ON
 ```
-ros2 param set /global_planner use_all_waypoints true   # ON
-ros2 param set /global_planner use_all_waypoints false  # OFF
+ros2 param set /global_planner hop_by_hop false
+ros2 param set /global_planner use_all_waypoints true
 ```
+
+
+홉바이홉 ON
+```
+ros2 param set /global_planner hop_by_hop true
+ros2 param set /global_planner wp_reach_tol 0.45
+```
+
 
 현재 경로 확인(poses가 나와야 정상)
 ```
