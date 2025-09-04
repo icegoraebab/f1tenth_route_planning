@@ -56,6 +56,10 @@ ros2 launch f1tenth_route_planning path_plan.launch.py \
   pure_pursuit.use_scan_safety:=false \
   pure_pursuit.lookahead:=0.45
 ```
+
+### ✔️ 2B) or 2C) 결과
+<img width="459" height="643" alt="Image" src="https://github.com/user-attachments/assets/4f7c12ba-2b1a-45f5-9a35-139eab287ee5" />
+
 ## 터미널 2에서 다시 run 하지않고 bash에서 파라미터 바꾸기
 올 웨이포인트 ON
 ```
@@ -70,13 +74,14 @@ ros2 param set /global_planner wp_reach_tol 0.45
 ```
 
 ## RViz 에서 Publish Point 없애기
+
+모든 점 삭제
 ```
-#모든 점 삭제
 ros2 service call /waypoints_clear std_srvs/srv/Empty "{}"
 ```
 
+최근 한 점 삭제
 ```
-#최근 한 점 삭제
 ros2 service call /waypoints_pop   std_srvs/srv/Empty "{}"
 ```
 
