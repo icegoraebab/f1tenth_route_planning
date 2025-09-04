@@ -1,4 +1,4 @@
-F1TENTH Route Planning (ROS 2 Foxy)
+## 🚀 F1TENTH Route Planning (ROS 2 Foxy)
 
 프레임 체인: map → ego_racecar/base_link
 구성: 글로벌 경로계획(A*) + 로컬 추종(Pure Pursuit)
@@ -6,18 +6,18 @@ F1TENTH Route Planning (ROS 2 Foxy)
 
 
 
-# 0) 빌드 & 오버레이
+## 0) 빌드 & 오버레이
 ```
 cd ~/sim_ws
 colcon build --symlink-install --merge-install --packages-select f1tenth_route_planning
 source /opt/ros/foxy/setup.bash
 source ~/sim_ws/install/setup.bash
 ```
-# 1) 터미널 1 — 시뮬
+## 1) 터미널 1 — 시뮬
 ```
 ros2 launch f1tenth_gym_ros gym_bridge_launch.py
 ```
-# 2A) 터미널 2 — 기본형(마지막 점 1개 목표)
+## 2A) 터미널 2 — 기본형(마지막 점 1개 목표)
 ```
 ros2 launch f1tenth_route_planning path_plan.launch.py \
   global_planner.base_frame:=ego_racecar/base_link \
@@ -30,7 +30,7 @@ ros2 launch f1tenth_route_planning path_plan.launch.py \
   pure_pursuit.lookahead:=0.5
 
 ```
-# 2B) 터미널 2 — 멀티 웨이포인트 ON(모든 점 잇기)
+## 2B) 터미널 2 — 멀티 웨이포인트 ON(모든 점 잇기)
 ```
 ros2 launch f1tenth_route_planning path_plan.launch.py \
   global_planner.base_frame:=ego_racecar/base_link \
@@ -42,7 +42,7 @@ ros2 launch f1tenth_route_planning path_plan.launch.py \
   pure_pursuit.use_scan_safety:=false \
   pure_pursuit.lookahead:=0.5
 ```
-# 2C) 터미널 2 — Hope by Hope ON(각 점 도착시 다음 점으로 경로 재계획 )
+## 2C) 터미널 2 — Hope by Hope ON(각 점 도착시 다음 점으로 경로 재계획 )
 
 ```
 ros2 launch f1tenth_route_planning path_plan.launch.py \
@@ -56,7 +56,7 @@ ros2 launch f1tenth_route_planning path_plan.launch.py \
   pure_pursuit.use_scan_safety:=false \
   pure_pursuit.lookahead:=0.45
 ```
-# 터미널 2에서 다시 run 하지않고 bash에서 파라미터 바꾸기
+## 터미널 2에서 다시 run 하지않고 bash에서 파라미터 바꾸기
 ```
 # 올-웨이포인트 ON
 ros2 param set /global_planner hop_by_hop false
@@ -64,23 +64,23 @@ ros2 param set /global_planner use_all_waypoints true
 ```
 
 ```
-# 홉바이홉 ON
+## 홉바이홉 ON
 ros2 param set /global_planner hop_by_hop true
 ros2 param set /global_planner wp_reach_tol 0.45
 ```
 
-# RViz 에서 Publish Point 없애기
+## RViz 에서 Publish Point 없애기
 ```
-#모든 점 삭제
+## 모든 점 삭제
 ros2 service call /waypoints_clear std_srvs/srv/Empty "{}"
 ```
 
 ```
-#최근 한 점 삭제
+## 최근 한 점 삭제
 ros2 service call /waypoints_pop   std_srvs/srv/Empty "{}"
 ```
 
-# RViz
+## RViz
 
 Fixed Frame=map
 
@@ -94,7 +94,7 @@ Toolbar Publish Point → Frame=map, Topic=/clicked_point
 
 2C) 홉 바이 홉: 원하는 만큼 점을 순서대로 클릭
 
-# 개요
+## 개요
 
 글로벌 경로계획: /map(OccupancyGrid) 기반 A* 경로 탐색
 
@@ -106,7 +106,7 @@ A* 실패 시 직선 보간(fallback) 으로라도 /global_path 발행
 
 웨이포인트 관리: 클릭/초기화/Undo, 멀티 웨이포인트 모드 지원, hop by hop 지원
 
-# 요구 사항
+## 요구 사항
 
 Ubuntu 20.04 / ROS 2 Foxy
 
@@ -120,11 +120,11 @@ Python 라이브러리: transforms3d (이미 사용 중)
 sudo apt install ros-foxy-tf-transformations
 
 
-RViz 사용법
+#### ✔️ RViz 사용법
 
 Fixed Frame: map
 
-표시 추가
+#### ✅ 표시 추가
 
 Path: /global_path
 
@@ -138,7 +138,7 @@ Frame=map, Topic=/clicked_point
 
 멀티: 점 여러 개(S/ㄴ자처럼 구부려 테스트 권장)
 
-# 자주 쓰는 명령어
+## 자주 쓰는 명령어
 1) 웨이포인트 전체 초기화
 ```
 ros2 service call /waypoints_clear std_srvs/srv/Empty {}
@@ -169,7 +169,7 @@ TF 확인 (숫자 갱신되면 OK)
 ros2 run tf2_ros tf2_echo map ego_racecar/base_link | head -n 10
 ```
 
-# 주의
+## 주의
 frame id 제대로 확인.
 
 ego_racecar/base_link 이므로 
@@ -179,7 +179,7 @@ ros2 param get /global_planner base_frame  # → ego_racecar/base_link
 ```
 
 
-# 파라미터 요약
+## 파라미터 요약
 
 | 노드            | 파라미터            | 설명                     | 설정                  |
 |:----------------|:--------------------|:-------------------------|:----------------------|
@@ -193,7 +193,7 @@ ros2 param get /global_planner base_frame  # → ego_racecar/base_link
 
 디버깅 단계에서는 AEB(안전정지)를 꺼두는 것을 권장 (use_scan_safety:=false).
 
-# 멀티 웨이포인트(All waypoint), 홉 바이 홉(Hop by Hop) 차이
+## 멀티 웨이포인트(All waypoint), 홉 바이 홉(Hop by Hop) 차이
 
 ### 중간점 ‘확실히 밟기’ 보장
 
